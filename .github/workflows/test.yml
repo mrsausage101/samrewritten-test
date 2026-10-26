@@ -1,27 +1,56 @@
-
-name: Test SamRewritten
+name: SamRewritten Scheduled Check
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "17 */6 * * *"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: samrewritten-check
+  cancel-in-progress: false
+
 jobs:
-  test:
+  download-and-test-cli:
     runs-on: windows-latest
+    timeout-minutes: 5
     steps:
-      - name: Check latest SamRewritten release
+      - name: Download latest Windows ZIP
         shell: pwsh
         run: |
-          $release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/PaulCombal/SamRewritten/releases/latest"
+          $ErrorActionPreference = "Stop"
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/PaulCombal/SamRewritten/releases/latest"
+          Write-Host "Release: $($release.tag_name)"
 
-          Write-Host "Latest release: $($release.tag_name)"
-          Write-Host "Available download files:"
-          $release.assets | ForEach-Object {
-            Write-Host " - $($_.name)"
+          $asset = $release.assets | Where-Object { $_.name -eq "SamRewritten-windows-x86_64.zip" } | Select-Object -First 1
+          if (-not $asset) {
+            throw "Could not find SamRewritten-windows-x86_64.zip in the latest release."
           }
 
-          if (-not $release.assets) {
-            throw "No downloadable release assets were found."
+          $zip = Join-Path $env:RUNNER_TEMP "samrewritten.zip"
+          $folder = Join-Path $env:RUNNER_TEMP "samrewritten"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $folder -Force
+
+          Write-Host "Extracted package contents:"
+          Get-ChildItem -Path $folder -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+
+          $cli = Get-ChildItem -Path $folder -Recurse -File -Filter "samrewritten-cli.exe" | Select-Object -First 1
+          if (-not $cli) {
+            $cli = Get-ChildItem -Path $folder -Recurse -File -Filter "*.exe" |
+              Where-Object { $_.Name -match "cli" } | Select-Object -First 1
           }
+          if (-not $cli) {
+            throw "Could not find the CLI executable in the ZIP. Review the file list above."
+          }
+
+          Write-Host "Testing CLI executable: $($cli.FullName)"
+          & $cli.FullName --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "CLI help command failed with exit code $LASTEXITCODE."
+          }
+
+          Write-Host "SUCCESS: Windows CLI downloaded, extracted, and its help command ran."
+          Write-Host "NOTE: This test does not idle a Steam game because this runner has no signed-in Steam client."
