@@ -1,4 +1,4 @@
-name: SamRewritten Scheduled Check
+name: Steam Game Idler Linux Smoke Test
 
 on:
   workflow_dispatch:
@@ -9,48 +9,64 @@ permissions:
   contents: read
 
 concurrency:
-  group: samrewritten-check
+  group: sgi-smoke-test
   cancel-in-progress: false
 
 jobs:
-  download-and-test-cli:
-    runs-on: windows-latest
-    timeout-minutes: 5
+  sgi-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
     steps:
-      - name: Download latest Windows ZIP
-        shell: pwsh
+      - name: Install Linux GUI runtime dependencies
         run: |
-          $ErrorActionPreference = "Stop"
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/PaulCombal/SamRewritten/releases/latest"
-          Write-Host "Release: $($release.tag_name)"
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb libwebkit2gtk-4.1-0 libgtk-3-0 libssl3 libayatana-appindicator3-1
 
-          $asset = $release.assets | Where-Object { $_.name -eq "SamRewritten-windows-x86_64.zip" } | Select-Object -First 1
-          if (-not $asset) {
-            throw "Could not find SamRewritten-windows-x86_64.zip in the latest release."
-          }
+      - name: Download latest Steam Game Idler AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$(mktemp)"
+          curl --fail --silent --show-error --location \
+            https://api.github.com/repos/zevnda/steam-game-idler/releases/latest \
+            -o "$release_json"
 
-          $zip = Join-Path $env:RUNNER_TEMP "samrewritten.zip"
-          $folder = Join-Path $env:RUNNER_TEMP "samrewritten"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath $folder -Force
+          asset_url="$(python3 - "$release_json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as f:
+              release = json.load(f)
+          assets = release.get("assets", [])
+          match = next((a for a in assets if a.get("name", "").endswith("_amd64.AppImage")), None)
+          if not match:
+              raise SystemExit("No Linux x86_64 AppImage found in latest SGI release")
+          print(match["browser_download_url"])
+          PY
+          )"
 
-          Write-Host "Extracted package contents:"
-          Get-ChildItem -Path $folder -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+          curl --fail --silent --show-error --location "$asset_url" -o "$RUNNER_TEMP/sgi.AppImage"
+          chmod +x "$RUNNER_TEMP/sgi.AppImage"
+          echo "Downloaded the latest Steam Game Idler AppImage."
+          "$RUNNER_TEMP/sgi.AppImage" --appimage-extract >/dev/null
+          echo "AppImage extraction succeeded."
+          echo "SGI_ROOT=$PWD/squashfs-root" >> "$GITHUB_ENV"
 
-          $cli = Get-ChildItem -Path $folder -Recurse -File -Filter "samrewritten-cli.exe" | Select-Object -First 1
-          if (-not $cli) {
-            $cli = Get-ChildItem -Path $folder -Recurse -File -Filter "*.exe" |
-              Where-Object { $_.Name -match "cli" } | Select-Object -First 1
-          }
-          if (-not $cli) {
-            throw "Could not find the CLI executable in the ZIP. Review the file list above."
-          }
-
-          Write-Host "Testing CLI executable: $($cli.FullName)"
-          & $cli.FullName --help
-          if ($LASTEXITCODE -ne 0) {
-            throw "CLI help command failed with exit code $LASTEXITCODE."
-          }
-
-          Write-Host "SUCCESS: Windows CLI downloaded, extracted, and its help command ran."
-          Write-Host "NOTE: This test does not idle a Steam game because this runner has no signed-in Steam client."
+      - name: Smoke-test application startup
+        shell: bash
+        run: |
+          set -uo pipefail
+          # This checks that the desktop app can start in a virtual display.
+          # It deliberately does not sign in, store credentials, or idle games.
+          set +e
+          timeout --signal=TERM 20s xvfb-run -a "$SGI_ROOT/AppRun" >"$RUNNER_TEMP/sgi-smoke.log" 2>&1
+          code=$?
+          set -e
+          if [ "$code" -eq 124 ] || [ "$code" -eq 143 ]; then
+            echo "PASS: SGI remained running for the 20-second startup smoke test."
+          elif [ "$code" -eq 0 ]; then
+            echo "PASS: SGI exited normally during startup smoke test."
+          else
+            echo "SGI startup smoke test failed (exit code $code). Last log lines:"
+            tail -n 60 "$RUNNER_TEMP/sgi-smoke.log" || true
+            exit "$code"
+          fi
