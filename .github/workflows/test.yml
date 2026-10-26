@@ -1,0 +1,27 @@
+
+name: Test SamRewritten
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Check latest SamRewritten release
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/PaulCombal/SamRewritten/releases/latest"
+
+          Write-Host "Latest release: $($release.tag_name)"
+          Write-Host "Available download files:"
+          $release.assets | ForEach-Object {
+            Write-Host " - $($_.name)"
+          }
+
+          if (-not $release.assets) {
+            throw "No downloadable release assets were found."
+          }
